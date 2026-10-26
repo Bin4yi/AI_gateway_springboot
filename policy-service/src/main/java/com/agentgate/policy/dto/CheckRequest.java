@@ -1,4 +1,6 @@
 package com.agentgate.policy.dto;
 
-public record CheckRequest() {
+import jakarta.validation.constraints.NotBlank;
+
+public record CheckRequest(@NotBlank String tenantId, @NotBlank String agentId, @NotBlank String tool) {
 }

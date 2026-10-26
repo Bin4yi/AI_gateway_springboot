@@ -1,4 +1,5 @@
 package com.agentgate.policy.dto;
 
-public class CheckResponse {
+public record CheckResponse(boolean allowed, String reason) {
+
 }
