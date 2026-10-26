@@ -1,0 +1,13 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: policy-service
+  datasource:
+    url: jdbc:postgresql://localhost:5432/policy_db
+    username: agentgate
+    password: agentgate
+  jpa:
+    hibernate:
+      ddl-auto: validate

@@ -89,5 +89,12 @@
         </dependency>
     </dependencies>
 
-    <!-- Add spring-boot-maven-plugin here after you write the main @SpringBootApplication class. -->
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
 </project>
