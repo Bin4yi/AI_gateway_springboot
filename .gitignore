@@ -16,3 +16,6 @@ Thumbs.db
 # Logs and local env
 *.log
 .env
+
+# Claude Code instructions (kept locally, not committed)
+CLAUDE.md
