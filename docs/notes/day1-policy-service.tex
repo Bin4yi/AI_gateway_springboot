@@ -1,0 +1,417 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2.2cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{listings}
+\usepackage{fancyhdr}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{accent}{HTML}{1F5FA8}
+\definecolor{codebg}{HTML}{F5F7FA}
+\definecolor{keyword}{HTML}{8A2BE2}
+\definecolor{comment}{HTML}{5F7F5F}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  keywordstyle=\color{keyword}\bfseries,
+  commentstyle=\color{comment}\itshape,
+  frame=single,
+  rulecolor=\color{black!15},
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+  xleftmargin=0.5em,
+  xrightmargin=0.5em,
+  aboveskip=0.8em,
+  belowskip=0.6em
+}
+\lstdefinelanguage{JavaX}{
+  language=Java,
+  morekeywords={record,var,interface,sealed}
+}
+\lstdefinestyle{java}{language=JavaX}
+\lstdefinestyle{sql}{language=SQL,morekeywords={BIGSERIAL,JSONB,TIMESTAMPTZ}}
+
+\newcommand{\code}[1]{\texttt{\small #1}}
+\newcommand{\sectioncolor}[1]{{\color{accent}#1}}
+
+\renewcommand{\arraystretch}{1.25}
+\setlist{itemsep=2pt,topsep=4pt}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.55em}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{AgentGate -- Day 1 notes}
+\rhead{Policy Service}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+\begin{document}
+
+% ---------------------------------------------------------------- title
+\begin{center}
+  {\Huge\bfseries\color{accent} AgentGate}\\[0.4em]
+  {\Large Day 1 Notes: Policy Service and Core Spring Concepts}\\[0.6em]
+  {\normalsize Monday, 26 October 2026 \quad|\quad Week 1 of 10}
+\end{center}
+\vspace{0.5em}
+\hrule
+\vspace{0.8em}
+
+\tableofcontents
+\newpage
+
+% ---------------------------------------------------------------- 1
+\section{What we built today}
+
+AgentGate is a gateway that sits between AI agents and company tools. Every agent
+action must pass three checks: \emph{who is the agent}, \emph{is it allowed}, and
+\emph{does the company still have budget}. Today we built the second check: the
+\textbf{Policy Service}.
+
+\begin{tabular}{@{}p{3.2cm}p{11.8cm}@{}}
+\toprule
+\textbf{Area} & \textbf{Result} \\
+\midrule
+Project setup (Week 0) & Maven multi-module project, parent POM, five service modules plus \code{common}; Docker Compose with Postgres 16, Redis 7 and Kafka (KRaft mode). All three containers healthy. \\
+Database & Flyway migration \code{V1\_\_create\_policies.sql}; separate database per service. \\
+Code & Entity, repository, four DTO records, service interface and implementation, REST controller. \\
+Tested live & Create rule (201), list rules (200), check (200), validation error (400), and ``DENY wins'' proven with real HTTP calls. \\
+Still to do (Week 1) & Global exception handler, Caffeine cache, Mockito unit tests. \\
+\bottomrule
+\end{tabular}
+
+% ---------------------------------------------------------------- 2
+\section{Project setup}
+
+\subsection{Why a parent POM}
+The parent \code{pom.xml} is the one file all six modules share. It holds settings once
+so they are not copied into every service.
+
+\begin{itemize}
+  \item \textbf{Module list}: one \code{mvn verify} at the root builds everything in the right order (\code{common} first).
+  \item \textbf{One Spring Boot version} (3.5.6) for every service, so library versions never differ.
+  \item \textbf{One Java version} (21).
+  \item \textbf{\code{dependencyManagement}}: modules list a library without a version; the version comes from the parent.
+  \item \textbf{\code{pluginManagement}}: shared compiler setup (MapStruct).
+\end{itemize}
+
+A module uses the parent (\code{<parent>}) to get \emph{settings}, and uses \code{common}
+as a dependency (\code{<dependency>}) to get \emph{code}. These are different things.
+
+\subsection{Infrastructure (Docker Compose)}
+\begin{itemize}
+  \item \textbf{Postgres}: one server, four databases (\code{auth\_db}, \code{policy\_db}, \code{budget\_db}, \code{orchestrator\_db}). No service reads another service's database.
+  \item \textbf{Redis}: AOF persistence on with \code{appendfsync everysec}, so a restart loses at most about one second of writes.
+  \item \textbf{Kafka}: one node acting as broker and controller (KRaft, no ZooKeeper). Apps on the laptop use \code{localhost:9092}; apps inside Compose use \code{kafka:29092}.
+\end{itemize}
+
+% ---------------------------------------------------------------- 3
+\section{Business logic of the Policy Service}
+
+The Policy Service answers one question: \emph{``Is this agent allowed to use this tool?''}
+In the full flow the Orchestrator asks it before any budget is spent. A ``no'' stops the
+action with status \code{DENIED}.
+
+\subsection{A policy is a rule}
+One row in the \code{policies} table is one rule, for example:
+\emph{in tenant \code{acme}, agent \code{support-bot}, tool \code{send\_email} $\rightarrow$ ALLOW}.
+
+\begin{tabular}{@{}p{2.8cm}p{12.2cm}@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning} \\
+\midrule
+\code{tenantId} & Which customer company owns the rule. Rules of different companies stay separate. \\
+\code{agentId}  & Which AI agent the rule applies to. \\
+\code{tool}     & Which tool the agent wants to use. \\
+\code{effect}   & \code{ALLOW} or \code{DENY}. \\
+\code{conditions} & Extra limits as JSON, e.g.\ weekdays only. Stored now, enforced later (Strategy pattern). \\
+\bottomrule
+\end{tabular}
+
+\subsection{The three operations}
+\begin{enumerate}
+  \item \textbf{Create} -- \code{POST /policies} returns 201 with the saved rule. The client cannot choose \code{id} or \code{createdAt}.
+  \item \textbf{List} -- \code{GET /policies} returns all rules (admin).
+  \item \textbf{Check} -- \code{POST /policies/check} is the real business logic.
+\end{enumerate}
+
+\subsection{The check rule}
+The service loads all rules for the exact tenant, agent and tool, then decides:
+
+\begin{enumerate}
+  \item If \textbf{any} rule is \code{DENY} $\rightarrow$ not allowed (\emph{denied by policy}).
+  \item Else if \textbf{any} rule is \code{ALLOW} $\rightarrow$ allowed (\emph{allowed by policy}).
+  \item Else $\rightarrow$ not allowed (\emph{no matching rule}).
+\end{enumerate}
+
+\textbf{Why these two principles matter}
+\begin{itemize}
+  \item \textbf{DENY always wins.} If both an ALLOW and a DENY exist, access is blocked. A mistake in the rules should lock the door, not open it. The result does not depend on which rule was saved first. (Our first version returned on the first row it saw, which broke this. A good example of a security bug.)
+  \item \textbf{Default deny.} If nothing matches, the answer is no. This is the \emph{zero trust} idea: never allow because of silence.
+\end{itemize}
+
+\subsection{Live test results}
+\begin{tabular}{@{}p{7.2cm}p{7.8cm}@{}}
+\toprule
+\textbf{Test} & \textbf{Result} \\
+\midrule
+Check with no rules & 200, allowed = false, ``no matching rule'' \\
+Create an ALLOW rule & 201, server filled \code{id} and \code{createdAt} \\
+Check again & allowed = true \\
+Add a DENY rule, check again & allowed = false, ``denied by policy'' \\
+Blank \code{tenantId} & 400 (validation works) \\
+\code{GET /policies} & 200 with both rules \\
+\bottomrule
+\end{tabular}
+
+% ---------------------------------------------------------------- 4
+\section{The layers}
+
+Every service follows Controller $\rightarrow$ Service $\rightarrow$ Repository. A layer
+never skips the next one, and the entity never leaves the service layer.
+
+\begin{tabular}{@{}p{2.6cm}p{3.7cm}p{8.7cm}@{}}
+\toprule
+\textbf{Layer} & \textbf{Our class} & \textbf{Its one job} \\
+\midrule
+Controller & \code{PolicyController} & Receive JSON, validate (\code{@Valid}), call the service, return the result. No rules here. \\
+Service & \code{PolicyServiceImpl} & Business rules, transactions, entity $\leftrightarrow$ DTO conversion. \\
+Repository & \code{PolicyRepository} & Load and save data. Spring writes the code. \\
+Entity & \code{Policy} & One object = one table row. \\
+DTO & four records & Carry data in and out of the API. \\
+\bottomrule
+\end{tabular}
+
+\begin{lstlisting}[style=java,caption={Request flow for POST /policies/check}]
+JSON body -> CheckRequest (validated) -> PolicyController.checkPolicy
+          -> PolicyServiceImpl.check   -> PolicyRepository.findByTenantIdAndAgentIdAndTool
+          -> database -> List<Policy>  -> CheckResponse -> JSON
+\end{lstlisting}
+
+% ---------------------------------------------------------------- 5
+\section{Important concepts}
+
+\subsection{Entity vs repository}
+An \textbf{entity} is the data: one Java object is one table row, with fields only.
+A \textbf{repository} is the tool that saves and loads entities. Think of the entity as a
+form and the repository as the filing cabinet.
+
+\begin{tabular}{@{}p{2.4cm}p{6.2cm}p{6.4cm}@{}}
+\toprule
+ & \textbf{Entity} & \textbf{Repository} \\
+\midrule
+Is a & class & interface \\
+Contains & fields (columns) & query methods \\
+You write & fields and annotations & almost nothing; Spring generates it \\
+\bottomrule
+\end{tabular}
+
+\begin{lstlisting}[style=java]
+@Entity @Table(name = "policies")
+public class Policy {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    @Column(nullable = false) private String tenantId;
+    ...
+}
+
+public interface PolicyRepository extends JpaRepository<Policy, Long> {
+    List<Policy> findByTenantIdAndAgentIdAndTool(String tenantId, String agentId, String tool);
+}
+\end{lstlisting}
+
+\subsection{How column names are mapped}
+Hibernate reads each field of the entity. It uses \code{@Column(name=...)} if present;
+otherwise Spring Boot converts camelCase to snake\_case (\code{tenantId} $\rightarrow$
+\code{tenant\_id}). With \code{ddl-auto: validate}, Hibernate checks that every column
+exists in the real table and refuses to start on a mismatch. Our typo \code{tennatId}
+would have failed exactly this way. The SQL file is the truth; the entity is a
+description that must agree with it. \code{@Column} also carries \code{nullable}, \code{length} and similar settings.
+
+\subsection{Derived queries}
+Spring reads the \emph{method name} and builds the query:
+\code{find} (SELECT) \code{By} (conditions start) \code{TenantId} \code{And} \code{AgentId} \code{And} \code{Tool}.
+Names refer to \textbf{Java field names}, parameters match by \textbf{position}, and
+mistakes fail at startup. Resulting SQL:
+
+\begin{lstlisting}[style=sql]
+SELECT id, tenant_id, agent_id, tool, effect, conditions, created_at
+FROM policies WHERE tenant_id = ? AND agent_id = ? AND tool = ?
+\end{lstlisting}
+
+For custom queries use \code{@Query} with JPQL (entity and field names) or
+\code{nativeQuery = true} for Postgres features such as JSONB. \code{@Modifying} is
+required for UPDATE and DELETE.
+
+\subsection{DTO (Data Transfer Object)}
+A DTO is a plain object that carries data in and out of the API. The entity is the recipe
+card in the kitchen; the DTO is the plate served to the customer.
+
+\textbf{Why not return entities directly}
+\begin{itemize}
+  \item Clients could send or overwrite fields like \code{id} and \code{createdAt}.
+  \item The API would be tied to the database design.
+  \item Create and response need different fields.
+  \item Validation annotations belong on the input object.
+  \item JPA internals (lazy loading) can break JSON output.
+\end{itemize}
+
+\textbf{Our four DTOs:} \code{CreatePolicyRequest} (\code{@NotBlank} strings, \code{@NotNull Effect}),
+\code{PolicyResponse}, \code{CheckRequest}, \code{CheckResponse}.
+We corrected one: \code{CreatePolicyRequest} had \code{effect} as a \code{String}, a
+\code{@NotBlank} on a \code{Map}, and a client-supplied \code{createdAt}.
+
+\subsection{Records}
+A \code{record} is a short class for immutable data. Java generates the private final
+fields, constructor, accessors, \code{equals}, \code{hashCode} and \code{toString}.
+Accessors have \emph{no} \code{get} prefix: \code{request.tenantId()}, not \code{getTenantId()}.
+Entities cannot be records because JPA needs to change fields and needs an empty constructor.
+
+\begin{lstlisting}[style=java]
+public record CheckResponse(boolean allowed, String reason) { }
+\end{lstlisting}
+
+\subsection{Service layer, interface and implementation}
+The service holds business logic. The interface (\code{PolicyService}) says \emph{what}
+can be done; the class (\code{PolicyServiceImpl}) says \emph{how}. The controller depends
+only on the interface, so the implementation can be swapped or mocked. An interface has no
+fields and no constructor; only the class does.
+
+\subsection{Dependency injection and the constructor}
+\begin{lstlisting}[style=java]
+private final PolicyRepository policyRepository;
+
+public PolicyServiceImpl(PolicyRepository policyRepository) {
+    this.policyRepository = policyRepository;
+}
+\end{lstlisting}
+Spring sees \code{@Service}, sees the constructor needs a repository, builds or finds one,
+and calls the constructor. We never write \code{new} for it.
+
+\textbf{Why constructor injection:} the field can be \code{final}; tests can pass a fake
+repository straight to the constructor; missing dependencies fail at startup; all
+dependencies are visible in one place.
+
+\textbf{Why not \code{new}:} a repository is an interface (cannot be created with \code{new});
+real dependencies need their own dependencies; Spring shares one instance; annotations such as
+\code{@Transactional} and \code{@Cacheable} only work on Spring-made proxies and are
+\emph{silently ignored} on a plain \code{new} object; tests could not substitute fakes.
+This is \textbf{Inversion of Control}. Use \code{new} for data (DTOs, entities), inject
+long-lived helpers (services, repositories, clients).
+
+\textbf{Rule of thumb:} if a class calls another Spring object, add a \code{private final}
+field, one constructor parameter, and one \code{this.x = x;} line.
+
+\subsection{\texttt{@Transactional}}
+A transaction groups database steps so that \emph{all succeed or none are saved}.
+Spring wraps the method in a proxy: start, then commit on normal return or roll back on a
+\code{RuntimeException}.
+
+\begin{tabular}{@{}p{2.4cm}p{5.2cm}p{7.4cm}@{}}
+\toprule
+\textbf{Method} & \textbf{Annotation} & \textbf{Why} \\
+\midrule
+\code{create} & \code{@Transactional} & It writes; nothing is half-saved on failure. \\
+\code{list}, \code{check} & \code{@Transactional(readOnly = true)} & Read only; lets Spring and Hibernate skip write work. \\
+\bottomrule
+\end{tabular}
+
+Put it on \textbf{service} methods only. Pitfall (common interview question): calling a
+\code{@Transactional} method from another method \emph{in the same class} bypasses the proxy
+and starts no transaction. It matters most later, when ``set status COMPLETED \emph{and} write
+the outbox row'' must be one transaction.
+
+\subsection{\texttt{extends} vs \texttt{implements}; inheritance vs polymorphism}
+\begin{tabular}{@{}p{2.4cm}p{6.1cm}p{6.5cm}@{}}
+\toprule
+ & \textbf{extends} & \textbf{implements} \\
+\midrule
+Reads as & ``is a'' & ``also can do'' \\
+Parent is & a class (or an interface, if the child is an interface) & an interface \\
+How many & one class & many interfaces \\
+Our code & \code{PolicyRepository extends JpaRepository} & \code{PolicyServiceImpl implements PolicyService} \\
+\bottomrule
+\end{tabular}
+
+\textbf{Inheritance} means ``I get your methods''. \textbf{Polymorphism} is what it allows:
+a variable of the parent type holds a child object and the child's behavior runs. The
+controller holds a \code{PolicyService}; Spring supplies a \code{PolicyServiceImpl}.
+
+\subsection{SQL types used}
+\begin{tabular}{@{}p{3.2cm}p{11.8cm}@{}}
+\toprule
+\code{BIGSERIAL} & Auto-increment 64-bit number (\code{Long}). The database picks the id; entity uses \code{IDENTITY}. \\
+\code{TIMESTAMPTZ} & Date and time with time zone, stored in UTC (\code{Instant}). Avoids wrong times across servers. \\
+\code{JSONB} & Binary JSON that Postgres can query and index. Fits rules whose shape varies. Entity: \code{Map<String,Object>} with \code{@JdbcTypeCode(SqlTypes.JSON)}. \\
+\bottomrule
+\end{tabular}
+
+\subsection{Small but useful}
+\begin{itemize}
+  \item \code{Map.of()} builds a small \emph{read-only} map that cannot contain \code{null}. It is a \emph{value}, not a type: the field stays \code{Map<String,Object>}. We use it so \code{conditions} is \code{\{\}} instead of \code{null} (the column is NOT NULL).
+  \item \code{stream().anyMatch(p -> ...)} returns true if at least one element passes the test.
+  \item Flyway files are named \code{V1\_\_name.sql}; never edit an applied file, add \code{V2\_\_...} instead.
+  \item Spring 6 no longer matches \code{/policies/} for \code{/policies}; map the class path and leave method paths empty.
+  \item A parent-POM \code{spring-boot-maven-plugin} breaks a module with no main class; add it after writing \code{@SpringBootApplication}.
+\end{itemize}
+
+% ---------------------------------------------------------------- 6
+\section{Mistakes and lessons}
+
+\begin{tabular}{@{}p{6.2cm}p{8.8cm}@{}}
+\toprule
+\textbf{Mistake} & \textbf{Lesson} \\
+\midrule
+\code{.properties} lines in a \code{.yml} file & Use nested YAML (or rename to \code{.properties}); keep one config file. \\
+\code{SpringBootApplication.run} & The method is on \code{SpringApplication}; the annotation has no \code{run}. \\
+\code{class PolicyRepository extends JpaRepository} & A repository must be an \code{interface}. \\
+\code{tennatId} typo & Field names drive column names and query method names; \code{validate} catches it. \\
+Local variable instead of a field for the repository & Dependencies are fields set by the constructor. \\
+Returning on the first rule in a loop & Security logic must not depend on row order; DENY first. \\
+Default allow when no rule matched & Zero trust: default deny. \\
+Two \code{return} statements and a wrong return type & One return per path; return what the service gives back. \\
+\bottomrule
+\end{tabular}
+
+% ---------------------------------------------------------------- 7
+\section{Next steps}
+
+\textbf{Remaining in Week 1 (about 3--4 hours, ends around 28 October)}
+\begin{enumerate}
+  \item \code{GlobalExceptionHandler} with \code{@RestControllerAdvice}, returning \code{ProblemDetail} (RFC 9457) instead of a bare 400.
+  \item Caffeine \code{@Cacheable} on \code{check}, since it runs on every agent action.
+  \item Three Mockito tests: allow, deny, no matching rule (plus ``ALLOW and DENY gives deny'').
+  \item Commit in small pieces, and write the three-line daily note.
+\end{enumerate}
+
+\textbf{Upcoming}
+\begin{itemize}
+  \item Week 2: Auth Service (Spring Authorization Server, token exchange) and Gateway. The Policy Service will accept only valid JWTs and check \code{act.sub} equals \code{agentId}.
+  \item Week 3: Budget Service, the core of the project (Redis Lua, race test). First checkpoint on 15 November.
+\end{itemize}
+
+% ---------------------------------------------------------------- 8
+\section{Interview answers from today}
+
+\begin{enumerate}
+  \item \textbf{What does the Policy Service do?}\\
+  ``It decides if an agent can use a tool. A DENY rule always beats an ALLOW rule, and if no rule matches, the answer is deny. That is zero trust: nothing is allowed unless someone said so.''
+  \item \textbf{Why DTOs and not entities?}\\
+  ``DTOs hide the database design, stop clients from setting fields like id and timestamps, give each endpoint the shape it needs, and keep validation on the input.''
+  \item \textbf{Why constructor injection?}\\
+  ``Dependencies can be final, tests can pass fakes without Spring, and a missing dependency fails at startup. Using new would also bypass Spring proxies, so @Transactional would be silently ignored.''
+  \item \textbf{What does @Transactional do?}\\
+  ``It wraps the method so all database steps commit together or roll back together. Reads use readOnly.''
+\end{enumerate}
+
+\end{document}
