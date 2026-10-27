@@ -34,62 +34,76 @@ class PolicyServiceImplTest {
 
     @Test
     void check_noRules_isDeniedByDefault() {
-        givenRules();
+        // Arrange: the repository finds no rules
+        when(policyRepository.findByTenantIdAndAgentIdAndTool("acme", "support-bot", "send_email"))
+                .thenReturn(List.of());
 
+        // Act
         CheckResponse response = policyService.check(request);
 
+        // Assert
         assertThat(response.allowed()).isFalse();
         assertThat(response.reason()).isEqualTo("no matching rule");
     }
 
     @Test
     void check_onlyAllowRule_isAllowed() {
-        givenRules(rule(Effect.ALLOW));
+        // Arrange: the repository finds one ALLOW rule
+        when(policyRepository.findByTenantIdAndAgentIdAndTool("acme", "support-bot", "send_email"))
+                .thenReturn(List.of(rule(Effect.ALLOW)));
 
+        // Act
         CheckResponse response = policyService.check(request);
 
+        // Assert
         assertThat(response.allowed()).isTrue();
         assertThat(response.reason()).isEqualTo("allowed by policy");
     }
 
     @Test
     void check_onlyDenyRule_isDenied() {
-        givenRules(rule(Effect.DENY));
+        // Arrange: the repository finds one DENY rule
+        when(policyRepository.findByTenantIdAndAgentIdAndTool("acme", "support-bot", "send_email"))
+                .thenReturn(List.of(rule(Effect.DENY)));
 
+        // Act
         CheckResponse response = policyService.check(request);
 
+        // Assert
         assertThat(response.allowed()).isFalse();
         assertThat(response.reason()).isEqualTo("denied by policy");
     }
 
     @Test
     void check_allowThenDeny_denyWins() {
-        givenRules(rule(Effect.ALLOW), rule(Effect.DENY));
+        // Arrange: the repository finds an ALLOW rule first, then a DENY rule
+        when(policyRepository.findByTenantIdAndAgentIdAndTool("acme", "support-bot", "send_email"))
+                .thenReturn(List.of(rule(Effect.ALLOW), rule(Effect.DENY)));
 
+        // Act
         CheckResponse response = policyService.check(request);
 
+        // Assert
         assertThat(response.allowed()).isFalse();
         assertThat(response.reason()).isEqualTo("denied by policy");
     }
 
     @Test
     void check_denyThenAllow_denyWins() {
-        givenRules(rule(Effect.DENY), rule(Effect.ALLOW));   // reversed order: same result
+        // Arrange: same two rules, reversed order. The result must be the same.
+        when(policyRepository.findByTenantIdAndAgentIdAndTool("acme", "support-bot", "send_email"))
+                .thenReturn(List.of(rule(Effect.DENY), rule(Effect.ALLOW)));
 
+        // Act
         CheckResponse response = policyService.check(request);
 
+        // Assert
         assertThat(response.allowed()).isFalse();
         assertThat(response.reason()).isEqualTo("denied by policy");
     }
 
-    // Arrange step in one line: "the repository finds these rules for our request"
-    private void givenRules(Policy... rules) {
-        when(policyRepository.findByTenantIdAndAgentIdAndTool(
-                request.tenantId(), request.agentId(), request.tool()))
-                .thenReturn(List.of(rules));
-    }
-
+    // Builds one rule for our tenant, agent and tool
     private Policy rule(Effect effect) {
-        return new Policy(request.tenantId(), request.agentId(), request.tool(), effect, Map.of());
+        return new Policy("acme", "support-bot", "send_email", effect, Map.of());
     }
 }

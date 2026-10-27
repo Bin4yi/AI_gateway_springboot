@@ -11,3 +11,8 @@ spring:
   jpa:
     hibernate:
       ddl-auto: validate
+  cache:
+    type: caffeine
+    caffeine:
+      # At most 1000 answers, each removed 60 seconds after it was saved
+      spec: maximumSize=1000,expireAfterWrite=60s

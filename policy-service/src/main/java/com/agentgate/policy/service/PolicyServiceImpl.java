@@ -7,6 +7,8 @@ import com.agentgate.policy.dto.PolicyResponse;
 import com.agentgate.policy.entity.Effect;
 import com.agentgate.policy.entity.Policy;
 import com.agentgate.policy.repository.PolicyRepository;
+import org.springframework.cache.annotation.CacheEvict;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,6 +25,7 @@ public class PolicyServiceImpl implements PolicyService {
 
     @Override
     @Transactional
+    @CacheEvict(value = "policyChecks", allEntries = true)   // a new rule makes old answers wrong
     public PolicyResponse create(CreatePolicyRequest request) {
         Policy policy = new Policy(request.tenantId(), request.agentId(), request.tool(),
                 request.effect(), request.conditions());
@@ -39,6 +42,7 @@ public class PolicyServiceImpl implements PolicyService {
 
     @Override
     @Transactional(readOnly = true)
+    @Cacheable("policyChecks")   // key = the CheckRequest record (equal by value)
     public CheckResponse check(CheckRequest request) {
         List<Policy> policies = policyRepository.findByTenantIdAndAgentIdAndTool(
                 request.tenantId(), request.agentId(), request.tool());
