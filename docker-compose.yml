@@ -13,7 +13,8 @@ services:
       POSTGRES_PASSWORD: agentgate
       POSTGRES_DB: agentgate
     ports:
-      - "5432:5432"
+      # Host port 5433: 5432 is often taken by another local Postgres
+      - "5433:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
       # Runs only on the first start (empty volume): creates one database per service
@@ -30,7 +31,8 @@ services:
     # AOF on, fsync every second: a restart loses at most ~1 second of writes
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:
-      - "6379:6379"
+      # Host port 6380: 6379 is often taken by another local Redis
+      - "6380:6379"
     volumes:
       - redis-data:/data
     healthcheck:

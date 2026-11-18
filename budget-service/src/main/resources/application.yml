@@ -1,0 +1,17 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: budget-service
+  datasource:
+    url: jdbc:postgresql://localhost:5433/budget_db
+    username: agentgate
+    password: agentgate
+  jpa:
+    hibernate:
+      ddl-auto: validate
+  data:
+    redis:
+      host: localhost
+      port: 6380   # AgentGate's Redis (6379 is another project's Redis)

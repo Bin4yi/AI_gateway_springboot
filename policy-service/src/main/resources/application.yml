@@ -5,7 +5,7 @@ spring:
   application:
     name: policy-service
   datasource:
-    url: jdbc:postgresql://localhost:5432/policy_db
+    url: jdbc:postgresql://localhost:5433/policy_db
     username: agentgate
     password: agentgate
   jpa:
